@@ -3,610 +3,631 @@
 #include <chrono>
 #include <cctype>
 #include <cstdint>
+#include <cstring>
 #include <fstream>
+#include <memory>
 #include <string>
-#include <vector>
 
 namespace {
 
+// ── Constants ────────────────────────────────────────────────────────────────
 constexpr int BOARD_SIZE = 12;
+constexpr int NUM_SQUARES = BOARD_SIZE * BOARD_SIZE;
 constexpr char EMPTY = '.';
-constexpr int WIN_SCORE = 100000000;
-constexpr int INF_SCORE = 1000000000;
-constexpr std::array<char, BOARD_SIZE> kCols = {'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'j', 'k', 'm', 'n'};
+constexpr int WIN_SCORE  = 100000000;
+constexpr int INF_SCORE  = 1000000000;
+constexpr int MAX_PLY    = 64;
+constexpr int MAX_MOVES  = 256;
+constexpr std::array<char, BOARD_SIZE> kCols =
+    {'a','b','c','d','e','f','g','h','j','k','m','n'};
 
+// ── Direction tables ─────────────────────────────────────────────────────────
+static constexpr int kDiagDirs[4][2] = {{-1,-1},{-1,1},{1,-1},{1,1}};
+static constexpr int kOrthDirs[4][2] = {{-1,0},{1,0},{0,-1},{0,1}};
+static constexpr int kAllDirs[8][2]  = {{-1,-1},{-1,0},{-1,1},{0,-1},
+                                         {0,1},{1,-1},{1,0},{1,1}};
+
+// ── Zobrist ──────────────────────────────────────────────────────────────────
+constexpr int NUM_PIECE_TYPES = 16;
+constexpr int PIECE_NONE = -1;
+
+std::uint64_t zobrist_piece[NUM_PIECE_TYPES][BOARD_SIZE][BOARD_SIZE];
+std::uint64_t zobrist_side;
+
+int PieceIndex(char p) {
+  switch (p) {
+    case 'B': return 0;  case 'P': return 1;  case 'X': return 2;  case 'Y': return 3;
+    case 'G': return 4;  case 'T': return 5;  case 'S': return 6;  case 'N': return 7;
+    case 'b': return 8;  case 'p': return 9;  case 'x': return 10; case 'y': return 11;
+    case 'g': return 12; case 't': return 13; case 's': return 14; case 'n': return 15;
+    default:  return PIECE_NONE;
+  }
+}
+
+void InitZobrist() {
+  std::uint64_t s = 0x12345678ABCDEF01ULL;
+  auto next = [&]() { s ^= s << 13; s ^= s >> 7; s ^= s << 17; return s; };
+  for (int p = 0; p < NUM_PIECE_TYPES; ++p)
+    for (int r = 0; r < BOARD_SIZE; ++r)
+      for (int c = 0; c < BOARD_SIZE; ++c)
+        zobrist_piece[p][r][c] = next();
+  zobrist_side = next();
+}
+
+// ── Data types ───────────────────────────────────────────────────────────────
 struct Move {
-  int sr = 0;
-  int sc = 0;
-  int dr = 0;
-  int dc = 0;
+  int sr = 0, sc = 0, dr = 0, dc = 0;
   char captured = EMPTY;
+};
+
+struct MoveList {
+  Move moves[MAX_MOVES];
+  int count = 0;
+  void push(int sr, int sc, int dr, int dc, char cap) {
+    moves[count++] = {sr, sc, dr, dc, cap};
+  }
+  void clear() { count = 0; }
 };
 
 struct InputState {
   bool my_is_white = true;
-  double my_time = 0.0;
-  double opp_time = 0.0;
+  double my_time = 0.0, opp_time = 0.0;
   char board[BOARD_SIZE][BOARD_SIZE];
 };
 
-bool IsWhitePiece(char piece) {
-  return std::isupper(static_cast<unsigned char>(piece)) != 0;
-}
+// ── Transposition table ──────────────────────────────────────────────────────
+constexpr int TT_SIZE = 1 << 20;
+constexpr int TT_MASK = TT_SIZE - 1;
+enum TTFlag : std::uint8_t { TT_EXACT, TT_ALPHA, TT_BETA };
 
-bool IsBlackPiece(char piece) {
-  return std::islower(static_cast<unsigned char>(piece)) != 0;
-}
+struct TTEntry {
+  std::uint64_t key = 0;
+  std::int32_t  score = 0;
+  std::int16_t  depth = -1;
+  TTFlag        flag  = TT_EXACT;
+  std::uint8_t  from_sq = 0;   // sr*12+sc
+  std::uint8_t  to_sq   = 0;   // dr*12+dc
+};
 
-bool IsFriendly(char piece, bool side_white) {
-  if (piece == EMPTY) {
-    return false;
-  }
-  return side_white ? IsWhitePiece(piece) : IsBlackPiece(piece);
+// ── Helpers ──────────────────────────────────────────────────────────────────
+bool IsWhite(char p)  { return std::isupper(static_cast<unsigned char>(p)) != 0; }
+bool IsFriendly(char p, bool w) {
+  if (p == EMPTY) return false;
+  return w ? IsWhite(p) : !IsWhite(p);
 }
-
-bool IsEnemy(char piece, bool side_white) {
-  if (piece == EMPTY) {
-    return false;
-  }
-  return side_white ? IsBlackPiece(piece) : IsWhitePiece(piece);
-}
-
-bool InBounds(int r, int c) {
-  return r >= 0 && r < BOARD_SIZE && c >= 0 && c < BOARD_SIZE;
-}
-
-bool SameMove(const Move& a, const Move& b) {
-  return a.sr == b.sr && a.sc == b.sc && a.dr == b.dr && a.dc == b.dc;
-}
+bool InBounds(int r, int c) { return (unsigned)r < BOARD_SIZE && (unsigned)c < BOARD_SIZE; }
 
 int ColToIndex(char c) {
-  for (int i = 0; i < BOARD_SIZE; ++i) {
-    if (kCols[i] == c) {
-      return i;
-    }
-  }
+  for (int i = 0; i < BOARD_SIZE; ++i) if (kCols[i] == c) return i;
   return -1;
 }
+char IndexToCol(int i) { return (i >= 0 && i < BOARD_SIZE) ? kCols[i] : 'a'; }
 
-char IndexToCol(int idx) {
-  if (idx < 0 || idx >= BOARD_SIZE) {
-    return 'a';
+std::string MoveToString(const Move& m) {
+  return std::string(1, IndexToCol(m.sc)) + std::to_string(BOARD_SIZE - m.sr) +
+         " " +
+         std::string(1, IndexToCol(m.dc)) + std::to_string(BOARD_SIZE - m.dr);
+}
+
+int PieceValue(char pu) {
+  switch (pu) {
+    case 'P': return 100000; case 'X': return 900; case 'S': return 500;
+    case 'G': return 450;    case 'T': return 400; case 'N': return 350;
+    case 'Y': return 300;    case 'B': return 100; default:  return 0;
   }
-  return kCols[idx];
 }
 
-int BoardRowToRank(int board_row) {
-  return BOARD_SIZE - board_row;
-}
-
-std::string MoveToString(const Move& move) {
-  const char src_col = IndexToCol(move.sc);
-  const char dst_col = IndexToCol(move.dc);
-  const int src_rank = BoardRowToRank(move.sr);
-  const int dst_rank = BoardRowToRank(move.dr);
-  return std::string(1, src_col) + std::to_string(src_rank) + " " + std::string(1, dst_col) +
-         std::to_string(dst_rank);
-}
-
-bool ReadInput(const std::string& path, InputState* state) {
+bool ReadInput(const std::string& path, InputState* st) {
   std::ifstream in(path);
-  if (!in) {
-    return false;
-  }
-
+  if (!in) return false;
   std::string color;
-  if (!(in >> color)) {
-    return false;
-  }
-  state->my_is_white = (color == "WHITE");
-
-  if (!(in >> state->my_time >> state->opp_time)) {
-    return false;
-  }
-
+  if (!(in >> color)) return false;
+  st->my_is_white = (color == "WHITE");
+  if (!(in >> st->my_time >> st->opp_time)) return false;
   std::string line;
   for (int r = 0; r < BOARD_SIZE; ++r) {
-    if (!(in >> line) || static_cast<int>(line.size()) != BOARD_SIZE) {
-      return false;
-    }
-    for (int c = 0; c < BOARD_SIZE; ++c) {
-      state->board[r][c] = line[c];
-    }
+    if (!(in >> line) || (int)line.size() != BOARD_SIZE) return false;
+    for (int c = 0; c < BOARD_SIZE; ++c) st->board[r][c] = line[c];
   }
   return true;
 }
 
-void WriteOutput(const std::string& path, const std::string& move_string) {
+void WriteOutput(const std::string& path, const std::string& s) {
   std::ofstream out(path);
-  if (!out) {
-    return;
-  }
-  out << move_string << "\n";
+  if (out) out << s << "\n";
 }
 
-int PieceValue(char piece_upper) {
-  switch (piece_upper) {
-    case 'P':
-      return 100000;
-    case 'X':
-      return 900;
-    case 'S':
-      return 500;
-    case 'G':
-      return 450;
-    case 'T':
-      return 400;
-    case 'N':
-      return 350;
-    case 'Y':
-      return 300;
-    case 'B':
-      return 100;
-    default:
-      return 0;
-  }
-}
-
+// ── TimeUp ───────────────────────────────────────────────────────────────────
 class TimeUpException {};
 
+// ── Agent ────────────────────────────────────────────────────────────────────
 class Agent {
  public:
-  explicit Agent(const InputState& state)
-      : my_is_white_(state.my_is_white), my_time_(state.my_time), opp_time_(state.opp_time) {
-    for (int r = 0; r < BOARD_SIZE; ++r) {
+  explicit Agent(const InputState& st)
+      : my_is_white_(st.my_is_white), my_time_(st.my_time) {
+    hash_ = 0;
+    white_prince_ = false;
+    black_prince_ = false;
+    for (int r = 0; r < BOARD_SIZE; ++r)
       for (int c = 0; c < BOARD_SIZE; ++c) {
-        board_[r][c] = state.board[r][c];
+        board_[r][c] = st.board[r][c];
+        int pi = PieceIndex(board_[r][c]);
+        if (pi != PIECE_NONE) hash_ ^= zobrist_piece[pi][r][c];
+        if (board_[r][c] == 'P') white_prince_ = true;
+        if (board_[r][c] == 'p') black_prince_ = true;
       }
-    }
+    if (!my_is_white_) hash_ ^= zobrist_side;
+
+    tt_.reset(new TTEntry[TT_SIZE]());
+    std::memset(killers_, 0, sizeof(killers_));
+    std::memset(history_, 0, sizeof(history_));
   }
 
   bool SelectMove(Move* best_move) {
-    std::vector<Move> legal = GenerateAllMoves(my_is_white_);
-    if (legal.empty()) {
-      return false;
-    }
+    MoveList legal;
+    GenerateAllMoves(my_is_white_, legal);
+    if (legal.count == 0) return false;
 
-    OrderMoves(&legal, my_is_white_, false);
-    *best_move = legal.front();
+    // Fallback: pick the capture-first ordered move
+    int scores[MAX_MOVES];
+    ComputeScores(legal, my_is_white_, 0, false, nullptr, scores);
+    PickBest(legal, scores, 0);
+    *best_move = legal.moves[0];
 
-    if (my_time_ < 0.5) {
-      return true;
-    }
+    if (my_time_ < 0.5) return true;
 
     double time_for_move = std::min(my_time_ / 40.0, 0.1);
-    if (time_for_move < 0.05) {
-      time_for_move = 0.05;
-    }
+    if (time_for_move < 0.05) time_for_move = 0.05;
 
     deadline_ = std::chrono::steady_clock::now() +
                 std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                     std::chrono::duration<double>(time_for_move));
 
     has_root_hint_ = false;
-    for (int depth = 1; depth <= 64; ++depth) {
-      if (std::chrono::steady_clock::now() >= deadline_) {
-        break;
-      }
+    for (int depth = 1; depth <= MAX_PLY; ++depth) {
+      if (std::chrono::steady_clock::now() >= deadline_) break;
       node_count_ = 0;
       try {
-        Move depth_best{};
-        int depth_score = -INF_SCORE;
-        if (!SearchAtDepth(depth, &depth_best, &depth_score)) {
-          break;
-        }
-        *best_move = depth_best;
-        root_hint_ = depth_best;
+        Move db{}; int ds = -INF_SCORE;
+        if (!SearchAtDepth(depth, &db, &ds)) break;
+        *best_move = db;
+        root_hint_ = db;
         has_root_hint_ = true;
-        if (depth_score >= WIN_SCORE - 1000) {
-          break;
-        }
+        if (ds >= WIN_SCORE - 1000) break;
       } catch (const TimeUpException&) {
         break;
       }
     }
-
     return true;
   }
 
  private:
-  bool my_is_white_ = true;
-  double my_time_ = 0.0;
-  double opp_time_ = 0.0;
+  // ── State ──────────────────────────────────────────────────────────────────
+  bool my_is_white_;
+  double my_time_;
   char board_[BOARD_SIZE][BOARD_SIZE];
+  std::uint64_t hash_ = 0;
+  bool white_prince_ = true, black_prince_ = true;
+
   std::chrono::steady_clock::time_point deadline_{};
   std::uint64_t node_count_ = 0;
   bool has_root_hint_ = false;
   Move root_hint_{};
 
+  std::unique_ptr<TTEntry[]> tt_;
+  Move killers_[MAX_PLY][2];
+  int  history_[2][NUM_SQUARES][NUM_SQUARES];
+
+  // ── Inline helpers ─────────────────────────────────────────────────────────
+  static int Sq(int r, int c) { return r * BOARD_SIZE + c; }
+
+  static bool SameMove(const Move& a, const Move& b) {
+    return a.sr == b.sr && a.sc == b.sc && a.dr == b.dr && a.dc == b.dc;
+  }
+
   void CheckTime() {
     ++node_count_;
-    if ((node_count_ & 1023ULL) == 0ULL && std::chrono::steady_clock::now() >= deadline_) {
+    if ((node_count_ & 1023ULL) == 0ULL &&
+        std::chrono::steady_clock::now() >= deadline_)
       throw TimeUpException();
-    }
   }
 
-  bool HasPrince(bool white) const {
-    const char prince = white ? 'P' : 'p';
-    for (int r = 0; r < BOARD_SIZE; ++r) {
-      for (int c = 0; c < BOARD_SIZE; ++c) {
-        if (board_[r][c] == prince) {
-          return true;
-        }
+  void HashPiece(char p, int r, int c) {
+    int pi = PieceIndex(p);
+    if (pi != PIECE_NONE) hash_ ^= zobrist_piece[pi][r][c];
+  }
+
+  // ── Make / Unmake ──────────────────────────────────────────────────────────
+  void MakeMove(const Move& m) {
+    char mv = board_[m.sr][m.sc];
+    HashPiece(mv, m.sr, m.sc);
+    if (m.captured != EMPTY) {
+      HashPiece(m.captured, m.dr, m.dc);
+      if (m.captured == 'P') white_prince_ = false;
+      if (m.captured == 'p') black_prince_ = false;
+    }
+    HashPiece(mv, m.dr, m.dc);
+    board_[m.sr][m.sc] = EMPTY;
+    board_[m.dr][m.dc] = mv;
+    hash_ ^= zobrist_side;
+  }
+
+  void UnmakeMove(const Move& m) {
+    char mv = board_[m.dr][m.dc];
+    hash_ ^= zobrist_side;
+    HashPiece(mv, m.dr, m.dc);
+    if (m.captured != EMPTY) {
+      HashPiece(m.captured, m.dr, m.dc);
+      if (m.captured == 'P') white_prince_ = true;
+      if (m.captured == 'p') black_prince_ = true;
+    }
+    HashPiece(mv, m.sr, m.sc);
+    board_[m.dr][m.dc] = m.captured;
+    board_[m.sr][m.sc] = mv;
+  }
+
+  // ── Move generation ────────────────────────────────────────────────────────
+  void TryAdd(int sr, int sc, int dr, int dc, bool w, MoveList& ml) const {
+    if (!InBounds(dr, dc)) return;
+    char t = board_[dr][dc];
+    if (IsFriendly(t, w)) return;
+    ml.push(sr, sc, dr, dc, t);
+  }
+
+  void AddSliding(int sr, int sc, bool w, int ms,
+                  const int d[][2], int nd, MoveList& ml) const {
+    for (int i = 0; i < nd; ++i)
+      for (int s = 1; s <= ms; ++s) {
+        int nr = sr + d[i][0]*s, nc = sc + d[i][1]*s;
+        if (!InBounds(nr, nc)) break;
+        char t = board_[nr][nc];
+        if (IsFriendly(t, w)) break;
+        ml.push(sr, sc, nr, nc, t);
+        if (t != EMPTY) break;
       }
-    }
-    return false;
   }
 
-  int EvaluateColor(bool white) const {
-    int score = 0;
-    int prince_r = -1;
-    int prince_c = -1;
-
-    for (int r = 0; r < BOARD_SIZE; ++r) {
-      for (int c = 0; c < BOARD_SIZE; ++c) {
-        const char piece = board_[r][c];
-        if (piece == EMPTY) {
-          continue;
-        }
-        if (white != IsWhitePiece(piece)) {
-          continue;
-        }
-
-        const char piece_upper = static_cast<char>(std::toupper(static_cast<unsigned char>(piece)));
-        score += PieceValue(piece_upper);
-
-        if (piece_upper == 'B') {
-          int advance = white ? (10 - r) : (r - 1);
-          if (advance > 0) {
-            score += advance * 8;
-          }
-        }
-
-        if (piece_upper != 'B' && piece_upper != 'P') {
-          const int center_dist = std::abs(r - 5) + std::abs(c - 5);
-          const int center_bonus = std::max(0, 6 - center_dist);
-          score += center_bonus * 4;
-        }
-
-        if (piece_upper == 'P') {
-          prince_r = r;
-          prince_c = c;
-        }
-      }
-    }
-
-    if (prince_r != -1) {
-      int friendly_neighbors = 0;
-      for (int dr = -1; dr <= 1; ++dr) {
-        for (int dc = -1; dc <= 1; ++dc) {
-          if (dr == 0 && dc == 0) {
-            continue;
-          }
-          const int nr = prince_r + dr;
-          const int nc = prince_c + dc;
-          if (!InBounds(nr, nc)) {
-            continue;
-          }
-          if (IsFriendly(board_[nr][nc], white)) {
-            ++friendly_neighbors;
-          }
-        }
-      }
-      score += friendly_neighbors * 18;
-    }
-
-    return score;
-  }
-
-  int Evaluate(bool side_white) const {
-    const bool white_prince = HasPrince(true);
-    const bool black_prince = HasPrince(false);
-
-    if (!white_prince && !black_prince) {
-      return 0;
-    }
-    if (!white_prince) {
-      return side_white ? -WIN_SCORE : WIN_SCORE;
-    }
-    if (!black_prince) {
-      return side_white ? WIN_SCORE : -WIN_SCORE;
-    }
-
-    const int white_score = EvaluateColor(true);
-    const int black_score = EvaluateColor(false);
-    return side_white ? (white_score - black_score) : (black_score - white_score);
-  }
-
-  void MakeMove(const Move& move) {
-    const char moving_piece = board_[move.sr][move.sc];
-    board_[move.sr][move.sc] = EMPTY;
-    board_[move.dr][move.dc] = moving_piece;
-  }
-
-  void UnmakeMove(const Move& move) {
-    const char moving_piece = board_[move.dr][move.dc];
-    board_[move.dr][move.dc] = move.captured;
-    board_[move.sr][move.sc] = moving_piece;
-  }
-
-  void TryAddMove(int sr, int sc, int dr, int dc, bool side_white, std::vector<Move>* moves) const {
-    if (!InBounds(dr, dc)) {
-      return;
-    }
-    const char target = board_[dr][dc];
-    if (IsFriendly(target, side_white)) {
-      return;
-    }
-    moves->push_back(Move{sr, sc, dr, dc, target});
-  }
-
-  void AddSlidingMoves(int sr, int sc, bool side_white, int max_steps, const int dirs[][2], int dir_count,
-                       std::vector<Move>* moves) const {
-    for (int i = 0; i < dir_count; ++i) {
-      const int dr = dirs[i][0];
-      const int dc = dirs[i][1];
-      for (int step = 1; step <= max_steps; ++step) {
-        const int nr = sr + dr * step;
-        const int nc = sc + dc * step;
-        if (!InBounds(nr, nc)) {
-          break;
-        }
-        const char target = board_[nr][nc];
-        if (IsFriendly(target, side_white)) {
-          break;
-        }
-        moves->push_back(Move{sr, sc, nr, nc, target});
-        if (target != EMPTY) {
-          break;
-        }
-      }
-    }
-  }
-
-  bool HasAdjacentFriendlyAfterSiblingMove(int sr, int sc, int dr, int dc, bool side_white) const {
-    for (int rr = -1; rr <= 1; ++rr) {
+  bool HasAdjFriendly(int sr, int sc, int dr, int dc, bool w) const {
+    for (int rr = -1; rr <= 1; ++rr)
       for (int cc = -1; cc <= 1; ++cc) {
-        if (rr == 0 && cc == 0) {
-          continue;
-        }
-        const int nr = dr + rr;
-        const int nc = dc + cc;
-        if (!InBounds(nr, nc)) {
-          continue;
-        }
-        if (nr == sr && nc == sc) {
-          continue;
-        }
-        if (IsFriendly(board_[nr][nc], side_white)) {
-          return true;
-        }
+        if (!rr && !cc) continue;
+        int nr = dr+rr, nc = dc+cc;
+        if (!InBounds(nr, nc) || (nr == sr && nc == sc)) continue;
+        if (IsFriendly(board_[nr][nc], w)) return true;
       }
-    }
     return false;
   }
 
-  void GenerateBabyMoves(int r, int c, bool side_white, std::vector<Move>* moves) const {
-    const int dir = side_white ? -1 : 1;
-    for (int step = 1; step <= 2; ++step) {
-      const int nr = r + dir * step;
-      if (!InBounds(nr, c)) {
-        break;
-      }
-      if (step == 2 && board_[r + dir][c] != EMPTY) {
-        break;
-      }
-      const char target = board_[nr][c];
-      if (IsFriendly(target, side_white)) {
-        break;
-      }
-      moves->push_back(Move{r, c, nr, c, target});
-      if (target != EMPTY) {
-        break;
+  void GenBaby(int r, int c, bool w, MoveList& ml) const {
+    int dir = w ? -1 : 1;
+    for (int s = 1; s <= 2; ++s) {
+      int nr = r + dir*s;
+      if (!InBounds(nr, c)) break;
+      if (s == 2 && board_[r+dir][c] != EMPTY) break;
+      char t = board_[nr][c];
+      if (IsFriendly(t, w)) break;
+      ml.push(r, c, nr, c, t);
+      if (t != EMPTY) break;
+    }
+  }
+
+  void GenScout(int r, int c, bool w, MoveList& ml) const {
+    int dir = w ? -1 : 1;
+    for (int f = 1; f <= 3; ++f) {
+      int nr = r + dir*f;
+      if (!InBounds(nr, c)) break;
+      for (int s = -1; s <= 1; ++s) {
+        int nc = c + s;
+        if (!InBounds(nr, nc)) continue;
+        char t = board_[nr][nc];
+        if (IsFriendly(t, w)) continue;
+        ml.push(r, c, nr, nc, t);
       }
     }
   }
 
-  void GenerateScoutMoves(int r, int c, bool side_white, std::vector<Move>* moves) const {
-    const int dir = side_white ? -1 : 1;
-    for (int forward = 1; forward <= 3; ++forward) {
-      const int nr = r + dir * forward;
-      if (!InBounds(nr, c)) {
-        break;
-      }
-      for (int side = -1; side <= 1; ++side) {
-        const int nc = c + side;
-        if (!InBounds(nr, nc)) {
-          continue;
-        }
-        const char target = board_[nr][nc];
-        if (IsFriendly(target, side_white)) {
-          continue;
-        }
-        moves->push_back(Move{r, c, nr, nc, target});
-      }
-    }
-  }
-
-  void GenerateSiblingMoves(int r, int c, bool side_white, std::vector<Move>* moves) const {
-    static const int kAllDirs[8][2] = {{-1, -1}, {-1, 0}, {-1, 1}, {0, -1},
-                                       {0, 1},   {1, -1}, {1, 0},  {1, 1}};
+  void GenSibling(int r, int c, bool w, MoveList& ml) const {
     for (const auto& d : kAllDirs) {
-      const int nr = r + d[0];
-      const int nc = c + d[1];
-      if (!InBounds(nr, nc)) {
-        continue;
-      }
-      const char target = board_[nr][nc];
-      if (IsFriendly(target, side_white)) {
-        continue;
-      }
-      if (HasAdjacentFriendlyAfterSiblingMove(r, c, nr, nc, side_white)) {
-        moves->push_back(Move{r, c, nr, nc, target});
-      }
+      int nr = r+d[0], nc = c+d[1];
+      if (!InBounds(nr, nc)) continue;
+      char t = board_[nr][nc];
+      if (IsFriendly(t, w)) continue;
+      if (HasAdjFriendly(r, c, nr, nc, w))
+        ml.push(r, c, nr, nc, t);
     }
   }
 
-  void GeneratePieceMoves(int r, int c, bool side_white, std::vector<Move>* moves) const {
-    const char piece = board_[r][c];
-    const char piece_upper = static_cast<char>(std::toupper(static_cast<unsigned char>(piece)));
-
-    static const int kDiagDirs[4][2] = {{-1, -1}, {-1, 1}, {1, -1}, {1, 1}};
-    static const int kOrthDirs[4][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
-    static const int kAllDirs[8][2] = {{-1, -1}, {-1, 0}, {-1, 1}, {0, -1},
-                                       {0, 1},   {1, -1}, {1, 0},  {1, 1}};
-
-    switch (piece_upper) {
-      case 'B':
-        GenerateBabyMoves(r, c, side_white, moves);
-        break;
-      case 'P':
-        for (const auto& d : kAllDirs) {
-          TryAddMove(r, c, r + d[0], c + d[1], side_white, moves);
-        }
-        break;
-      case 'X':
-        AddSlidingMoves(r, c, side_white, 3, kAllDirs, 8, moves);
-        break;
-      case 'Y':
-        for (const auto& d : kDiagDirs) {
-          TryAddMove(r, c, r + d[0], c + d[1], side_white, moves);
-        }
-        break;
-      case 'G':
-        AddSlidingMoves(r, c, side_white, 2, kOrthDirs, 4, moves);
-        break;
-      case 'T':
-        AddSlidingMoves(r, c, side_white, 2, kDiagDirs, 4, moves);
-        break;
-      case 'S':
-        GenerateScoutMoves(r, c, side_white, moves);
-        break;
-      case 'N':
-        GenerateSiblingMoves(r, c, side_white, moves);
-        break;
-      default:
-        break;
+  void GeneratePieceMoves(int r, int c, bool w, MoveList& ml) const {
+    char pu = (char)std::toupper((unsigned char)board_[r][c]);
+    switch (pu) {
+      case 'B': GenBaby(r, c, w, ml); break;
+      case 'P': for (const auto& d : kAllDirs)
+                  TryAdd(r, c, r+d[0], c+d[1], w, ml); break;
+      case 'X': AddSliding(r, c, w, 3, kAllDirs, 8, ml); break;
+      case 'Y': for (const auto& d : kDiagDirs)
+                  TryAdd(r, c, r+d[0], c+d[1], w, ml); break;
+      case 'G': AddSliding(r, c, w, 2, kOrthDirs, 4, ml); break;
+      case 'T': AddSliding(r, c, w, 2, kDiagDirs, 4, ml); break;
+      case 'S': GenScout(r, c, w, ml); break;
+      case 'N': GenSibling(r, c, w, ml); break;
     }
   }
 
-  std::vector<Move> GenerateAllMoves(bool side_white) const {
-    std::vector<Move> moves;
-    moves.reserve(192);
+  void GenerateAllMoves(bool w, MoveList& ml) const {
+    ml.clear();
+    for (int r = 0; r < BOARD_SIZE; ++r)
+      for (int c = 0; c < BOARD_SIZE; ++c)
+        if (board_[r][c] != EMPTY && IsFriendly(board_[r][c], w))
+          GeneratePieceMoves(r, c, w, ml);
+  }
 
-    for (int r = 0; r < BOARD_SIZE; ++r) {
+  void GenerateCaptures(bool w, MoveList& ml) const {
+    ml.clear();
+    for (int r = 0; r < BOARD_SIZE; ++r)
       for (int c = 0; c < BOARD_SIZE; ++c) {
-        const char piece = board_[r][c];
-        if (piece == EMPTY) {
-          continue;
-        }
-        if (!IsFriendly(piece, side_white)) {
-          continue;
-        }
-        GeneratePieceMoves(r, c, side_white, &moves);
+        if (board_[r][c] == EMPTY || !IsFriendly(board_[r][c], w)) continue;
+        int old = ml.count;
+        GeneratePieceMoves(r, c, w, ml);
+        // compact: keep only captures
+        int wr = old;
+        for (int i = old; i < ml.count; ++i)
+          if (ml.moves[i].captured != EMPTY)
+            ml.moves[wr++] = ml.moves[i];
+        ml.count = wr;
       }
-    }
-
-    return moves;
   }
 
-  int MoveOrderScore(const Move& move, bool side_white, bool allow_hint) const {
-    int score = 0;
-    if (allow_hint && has_root_hint_ && SameMove(move, root_hint_)) {
-      score += 1000000;
-    }
+  // ── Evaluation ─────────────────────────────────────────────────────────────
+  int Evaluate(bool side_white) const {
+    if (!white_prince_ && !black_prince_) return 0;
+    if (!white_prince_) return side_white ? -WIN_SCORE : WIN_SCORE;
+    if (!black_prince_) return side_white ? WIN_SCORE  : -WIN_SCORE;
 
-    if (move.captured != EMPTY) {
-      const int victim = PieceValue(static_cast<char>(std::toupper(static_cast<unsigned char>(move.captured))));
-      const char attacker_piece = board_[move.sr][move.sc];
-      const int attacker = PieceValue(static_cast<char>(std::toupper(static_cast<unsigned char>(attacker_piece))));
-      score += 200000 + victim * 16 - attacker;
-    }
+    int ws = 0, bs = 0;
+    int wpr = -1, wpc = -1, bpr = -1, bpc = -1;
 
-    const char attacker_piece = board_[move.sr][move.sc];
-    const char attacker_upper = static_cast<char>(std::toupper(static_cast<unsigned char>(attacker_piece)));
-    if (attacker_upper == 'B') {
-      const int forward = side_white ? (move.sr - move.dr) : (move.dr - move.sr);
-      score += forward * 6;
-    } else {
-      const int center_dist = std::abs(move.dr - 5) + std::abs(move.dc - 5);
-      score += std::max(0, 6 - center_dist);
-    }
+    for (int r = 0; r < BOARD_SIZE; ++r)
+      for (int c = 0; c < BOARD_SIZE; ++c) {
+        char p = board_[r][c];
+        if (p == EMPTY) continue;
+        char pu = (char)std::toupper((unsigned char)p);
+        int val = PieceValue(pu);
+        int pos = 0;
+        if (pu == 'B') {
+          int adv = IsWhite(p) ? (10 - r) : (r - 1);
+          if (adv > 0) pos = adv * 8;
+        } else if (pu == 'P') {
+          if (IsWhite(p)) { wpr = r; wpc = c; }
+          else            { bpr = r; bpc = c; }
+        } else {
+          int cd = std::abs(r - 5) + std::abs(c - 5);
+          pos = std::max(0, 6 - cd) * 4;
+        }
+        if (IsWhite(p)) ws += val + pos;
+        else            bs += val + pos;
+      }
 
-    return score;
+    // Prince safety: count friendly neighbors
+    auto safety = [&](int pr, int pc, bool w) -> int {
+      if (pr < 0) return 0;
+      int n = 0;
+      for (const auto& d : kAllDirs) {
+        int nr = pr+d[0], nc = pc+d[1];
+        if (InBounds(nr, nc) && IsFriendly(board_[nr][nc], w)) ++n;
+      }
+      return n * 18;
+    };
+    ws += safety(wpr, wpc, true);
+    bs += safety(bpr, bpc, false);
+
+    return side_white ? (ws - bs) : (bs - ws);
   }
 
-  void OrderMoves(std::vector<Move>* moves, bool side_white, bool allow_hint) const {
-    std::sort(moves->begin(), moves->end(),
-              [&](const Move& a, const Move& b) {
-                return MoveOrderScore(a, side_white, allow_hint) > MoveOrderScore(b, side_white, allow_hint);
-              });
+  // ── Move ordering ─────────────────────────────────────────────────────────
+  void ComputeScores(const MoveList& ml, bool w, int ply, bool is_root,
+                     const Move* tt_move, int scores[]) const {
+    for (int i = 0; i < ml.count; ++i) {
+      const Move& m = ml.moves[i];
+      int s = 0;
+      // TT move
+      if (tt_move && SameMove(m, *tt_move)) { scores[i] = 10000000; continue; }
+      // Root hint
+      if (is_root && has_root_hint_ && SameMove(m, root_hint_))
+        { scores[i] = 9000000; continue; }
+      // Captures: MVV-LVA
+      if (m.captured != EMPTY) {
+        int victim  = PieceValue((char)std::toupper((unsigned char)m.captured));
+        int attacker = PieceValue((char)std::toupper((unsigned char)board_[m.sr][m.sc]));
+        scores[i] = 5000000 + victim * 16 - attacker;
+        continue;
+      }
+      // Killer
+      if (ply >= 0 && ply < MAX_PLY &&
+          (SameMove(m, killers_[ply][0]) || SameMove(m, killers_[ply][1])))
+        { scores[i] = 4000000; continue; }
+      // History
+      int side = w ? 0 : 1;
+      scores[i] = history_[side][Sq(m.sr, m.sc)][Sq(m.dr, m.dc)];
+    }
   }
 
-  int Negamax(int depth, int alpha, int beta, bool side_white) {
+  // Incremental selection: swap best remaining to position idx
+  static void PickBest(MoveList& ml, int scores[], int idx) {
+    int best = idx;
+    for (int j = idx + 1; j < ml.count; ++j)
+      if (scores[j] > scores[best]) best = j;
+    if (best != idx) {
+      std::swap(ml.moves[idx], ml.moves[best]);
+      std::swap(scores[idx], scores[best]);
+    }
+  }
+
+  // ── Killer & history updates ───────────────────────────────────────────────
+  void StoreKiller(const Move& m, int ply) {
+    if (ply < 0 || ply >= MAX_PLY || m.captured != EMPTY) return;
+    if (!SameMove(m, killers_[ply][0])) {
+      killers_[ply][1] = killers_[ply][0];
+      killers_[ply][0] = m;
+    }
+  }
+
+  void UpdateHistory(const Move& m, bool w, int depth) {
+    if (m.captured != EMPTY) return;
+    history_[w ? 0 : 1][Sq(m.sr, m.sc)][Sq(m.dr, m.dc)] += depth * depth;
+  }
+
+  // ── TT helpers ─────────────────────────────────────────────────────────────
+  TTEntry* TTProbe(std::uint64_t key) {
+    TTEntry& e = tt_[key & TT_MASK];
+    return (e.key == key && e.depth >= 0) ? &e : nullptr;
+  }
+
+  void TTStore(std::uint64_t key, int score, int depth,
+               TTFlag flag, const Move& best) {
+    TTEntry& e = tt_[key & TT_MASK];
+    if (e.key == key && e.depth > depth) return; // keep deeper
+    e.key   = key;
+    e.score = score;
+    e.depth = (std::int16_t)depth;
+    e.flag  = flag;
+    e.from_sq = (std::uint8_t)Sq(best.sr, best.sc);
+    e.to_sq   = (std::uint8_t)Sq(best.dr, best.dc);
+  }
+
+  Move TTMoveDecode(const TTEntry* e) const {
+    Move m;
+    m.sr = e->from_sq / BOARD_SIZE;
+    m.sc = e->from_sq % BOARD_SIZE;
+    m.dr = e->to_sq   / BOARD_SIZE;
+    m.dc = e->to_sq   % BOARD_SIZE;
+    m.captured = EMPTY;
+    return m;
+  }
+
+  // ── Quiescence search ─────────────────────────────────────────────────────
+  int Quiescence(int alpha, int beta, bool side_white) {
     CheckTime();
 
-    const bool white_prince = HasPrince(true);
-    const bool black_prince = HasPrince(false);
-    if (!white_prince || !black_prince || depth == 0) {
+    if (!white_prince_ || !black_prince_)
       return Evaluate(side_white);
+
+    int stand_pat = Evaluate(side_white);
+    if (stand_pat >= beta) return beta;
+    if (stand_pat > alpha) alpha = stand_pat;
+
+    MoveList caps;
+    GenerateCaptures(side_white, caps);
+
+    int scores[MAX_MOVES];
+    ComputeScores(caps, side_white, -1, false, nullptr, scores);
+
+    for (int i = 0; i < caps.count; ++i) {
+      PickBest(caps, scores, i);
+      const Move& m = caps.moves[i];
+      MakeMove(m);
+      int score = -Quiescence(-beta, -alpha, !side_white);
+      UnmakeMove(m);
+      if (score >= beta) return beta;
+      if (score > alpha) alpha = score;
+    }
+    return alpha;
+  }
+
+  // ── Negamax with alpha-beta + TT + killers + history ──────────────────────
+  int Negamax(int depth, int alpha, int beta, bool side_white, int ply) {
+    CheckTime();
+
+    // Terminal: prince captured
+    if (!white_prince_ || !black_prince_)
+      return Evaluate(side_white);
+
+    // Leaf: quiescence
+    if (depth <= 0)
+      return Quiescence(alpha, beta, side_white);
+
+    // TT probe
+    std::uint64_t key = hash_;
+    Move  tt_move{};
+    Move* tt_move_ptr = nullptr;
+    TTEntry* tte = TTProbe(key);
+    if (tte) {
+      if (tte->depth >= depth) {
+        if (tte->flag == TT_EXACT) return tte->score;
+        if (tte->flag == TT_ALPHA && tte->score <= alpha) return alpha;
+        if (tte->flag == TT_BETA  && tte->score >= beta)  return beta;
+      }
+      tt_move = TTMoveDecode(tte);
+      tt_move_ptr = &tt_move;
     }
 
-    std::vector<Move> moves = GenerateAllMoves(side_white);
-    if (moves.empty()) {
-      return Evaluate(side_white);
-    }
-    OrderMoves(&moves, side_white, false);
+    // Generate & order
+    MoveList moves;
+    GenerateAllMoves(side_white, moves);
+    if (moves.count == 0) return Evaluate(side_white);
 
-    int best = -INF_SCORE;
-    for (const Move& move : moves) {
-      MakeMove(move);
-      const int score = -Negamax(depth - 1, -beta, -alpha, !side_white);
-      UnmakeMove(move);
+    int scores[MAX_MOVES];
+    ComputeScores(moves, side_white, ply, false, tt_move_ptr, scores);
 
-      if (score > best) {
-        best = score;
-      }
-      if (score > alpha) {
-        alpha = score;
-      }
+    Move best_move = moves.moves[0];
+    int  best = -INF_SCORE;
+    TTFlag flag = TT_ALPHA;
+
+    for (int i = 0; i < moves.count; ++i) {
+      PickBest(moves, scores, i);
+      const Move& m = moves.moves[i];
+
+      MakeMove(m);
+      int score = -Negamax(depth - 1, -beta, -alpha, !side_white, ply + 1);
+      UnmakeMove(m);
+
+      if (score > best) { best = score; best_move = m; }
+      if (score > alpha) { alpha = score; flag = TT_EXACT; }
       if (alpha >= beta) {
+        StoreKiller(m, ply);
+        UpdateHistory(m, side_white, depth);
+        flag = TT_BETA;
         break;
       }
     }
 
+    TTStore(key, best, depth, flag, best_move);
     return best;
   }
 
-  bool SearchAtDepth(int depth, Move* best_move, int* best_score) {
-    std::vector<Move> moves = GenerateAllMoves(my_is_white_);
-    if (moves.empty()) {
-      return false;
-    }
-    OrderMoves(&moves, my_is_white_, true);
+  // ── Root search at a given depth ───────────────────────────────────────────
+  bool SearchAtDepth(int depth, Move* out_move, int* out_score) {
+    MoveList moves;
+    GenerateAllMoves(my_is_white_, moves);
+    if (moves.count == 0) return false;
 
-    int alpha = -INF_SCORE;
-    const int beta = INF_SCORE;
-    int local_best_score = -INF_SCORE;
-    Move local_best = moves.front();
+    Move  tt_move{};
+    Move* tt_ptr = nullptr;
+    TTEntry* tte = TTProbe(hash_);
+    if (tte) { tt_move = TTMoveDecode(tte); tt_ptr = &tt_move; }
 
-    for (const Move& move : moves) {
+    int scores[MAX_MOVES];
+    ComputeScores(moves, my_is_white_, 0, true, tt_ptr, scores);
+
+    int alpha = -INF_SCORE, beta = INF_SCORE;
+    int local_best = -INF_SCORE;
+    Move local_move = moves.moves[0];
+
+    for (int i = 0; i < moves.count; ++i) {
+      PickBest(moves, scores, i);
       CheckTime();
-      MakeMove(move);
-      const int score = -Negamax(depth - 1, -beta, -alpha, !my_is_white_);
-      UnmakeMove(move);
+      const Move& m = moves.moves[i];
 
-      if (score > local_best_score) {
-        local_best_score = score;
-        local_best = move;
-      }
-      if (score > alpha) {
-        alpha = score;
-      }
+      MakeMove(m);
+      int score = -Negamax(depth - 1, -beta, -alpha, !my_is_white_, 1);
+      UnmakeMove(m);
+
+      if (score > local_best) { local_best = score; local_move = m; }
+      if (score > alpha) alpha = score;
     }
 
-    *best_move = local_best;
-    *best_score = local_best_score;
+    *out_move  = local_move;
+    *out_score = local_best;
+    TTStore(hash_, local_best, depth, TT_EXACT, local_move);
     return true;
   }
 };
@@ -614,19 +635,18 @@ class Agent {
 }  // namespace
 
 int main() {
+  InitZobrist();
   InputState state{};
   if (!ReadInput("input.txt", &state)) {
     WriteOutput("output.txt", "a1 a1");
     return 0;
   }
-
   Agent agent(state);
-  Move best_move{};
-  if (!agent.SelectMove(&best_move)) {
+  Move best{};
+  if (!agent.SelectMove(&best)) {
     WriteOutput("output.txt", "");
     return 0;
   }
-
-  WriteOutput("output.txt", MoveToString(best_move));
+  WriteOutput("output.txt", MoveToString(best));
   return 0;
 }
