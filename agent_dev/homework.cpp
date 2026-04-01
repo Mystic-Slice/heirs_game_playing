@@ -542,9 +542,16 @@ class Agent {
     int scores[MAX_MOVES];
     ComputeScores(caps, side_white, -1, false, nullptr, scores);
 
+    constexpr int DELTA_MARGIN = 200;
     for (int i = 0; i < caps.count; ++i) {
       PickBest(caps, scores, i);
       const Move& m = caps.moves[i];
+      // Delta pruning: skip if captured piece value + margin can't raise alpha
+      if (m.captured != EMPTY) {
+        char cu = (char)std::toupper((unsigned char)m.captured);
+        if (cu != 'P' && stand_pat + PieceValue(cu) + DELTA_MARGIN <= alpha)
+          continue;
+      }
       MakeMove(m);
       int score = -Quiescence(-beta, -alpha, !side_white);
       UnmakeMove(m);
@@ -580,6 +587,14 @@ class Agent {
       }
       tt_move = TTMoveDecode(tte);
       tt_move_ptr = &tt_move;
+    }
+
+    // Reverse futility pruning (static null move): if eval - margin >= beta
+    // at low depth, the position is so good we can return beta immediately.
+    if (depth <= 3 && beta > -WIN_SCORE + 1000 && beta < WIN_SCORE - 1000) {
+      int rfp_eval = Evaluate(side_white);
+      int rfp_margin = depth * 200;
+      if (rfp_eval - rfp_margin >= beta) return beta;
     }
 
     // Null Move Pruning
