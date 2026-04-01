@@ -30,8 +30,8 @@ def read_outcome(outcome_path, my_agent_dir):
 
 def main():
     parser = argparse.ArgumentParser(description="Run 100 matches between two agents.")
-    parser.add_argument("minimax", help="Directory for the minimax agent")
     parser.add_argument("my_agent", help="Directory for your agent")
+    parser.add_argument("minimax", help="Directory for the minimax agent")
     parser.add_argument("-n", type=int, default=100, help="Number of matches (default 100)")
     parser.add_argument("--compete", default=None,
                         help="Path to compete.py (default: $ASNLIB/public/compete.py, else ./compete.py)")

@@ -520,7 +520,7 @@ def main():
 
         # 1) Write input.txt for current agent
         input_path = os.path.join(d, "input.txt")
-        write_input(input_path, color, my_time, opp_time, board_lines, True)
+        write_input(input_path, color, my_time, opp_time, board_lines, False)
 
         # Remove stale output.txt if present
         output_path = os.path.join(d, "output.txt")

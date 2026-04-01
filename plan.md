@@ -7,8 +7,22 @@ HW2 for CSCI-561 (FoAI). Build an agent for "Heirs", a 12x12 chess-like board ga
 **Time measurement**: Wall clock (`time.time()`) — not Unix `time` CPU. No multi-threading benefit.
 **Initial time**: 300.0 seconds per side (default).
 
-## File to Create
-`D:\USCrelated\Sem-4\FoAI\HW\HW2\homework.cpp` — single C++ file (C++17).
+## Project Layout
+- `agent_dev/homework.cpp` — active development version (dir1, WHITE by default)
+- `agent_baseline/homework.cpp` — frozen baseline to test against (dir2, BLACK by default)
+- `compete.py` — game harness, takes two dirs, manages game loop, validates via engine
+  - `--swap` flag to flip colors
+  - Auto-recompiles if `.cpp` source exists (deletes old binary first)
+- `engine.cpp` / `check_moves.cpp` — move validator + legal move counter for compete.py
+- `run_matches.py` — batch runner for N games, alternating colors, writes `outcome.txt`
+  - Resolves `$ASNLIB/public/compete.py` automatically, or `--compete` flag
+
+## Persistent Files (per-game)
+- **`playdata.txt`** — deleted at game start by engine. Agent can read/write between moves.
+  - Useful for: position history (repetition avoidance), opening book data
+  - Format used: one Zobrist hash (uint64_t decimal) per line
+- **`calibrate.cpp`** → `calibration.txt` — run once before grading to benchmark CPU speed.
+  - Agent can read `calibration.txt` to adjust search depth/time allocation.
 
 ## Initial Board Layout
 ```
@@ -20,72 +34,88 @@ Row  1: G Y T S N X P N S T Y G   (White back rank)
 Cols:   a b c d e f g h j k m n   (skip 'i' and 'l')
 ```
 
-## Architecture (5 sections within the file)
+## Architecture (current agent_dev implementation)
 
-### 1. Board Representation & I/O
-- Parse `input.txt`: player color (WHITE/BLACK), time remaining (two doubles), 12x12 board grid
-- Board: `char board[12][12]` — row index 0 = row 12 on display (top), index 11 = row 1 (bottom)
+### Board Representation & I/O
+- Board: `char board[12][12]` — row 0 = rank 12 (top), row 11 = rank 1 (bottom)
 - Column mapping: `a,b,c,d,e,f,g,h,j,k,m,n` → indices 0-11
-- Helper: `int colToIndex(char c)` and `char indexToCol(int i)`
-- Output move as `"<src_col><src_row> <dst_col><dst_row>\n"` to `output.txt`
-- Valid piece chars: `.BPNXYGSTbpnxygst` (N=Sibling, S=Scout)
+- Output: `"<src_col><src_rank> <dst_col><dst_rank>\n"` to `output.txt`
 
-### 2. Move Generation
-A move: `struct Move { int sr, sc, dr, dc; char captured; }` (source row/col, dest row/col, captured piece for unmake)
+### Move Generation
+Uses stack-allocated `MoveList` (fixed array of 256 moves, no heap allocation).
 
 | Piece | Char | Movement Rules |
 |-------|------|----------------|
-| Baby (B/b) | 1-2 forward (White=row index decreasing, Black=row index increasing), no jump, captures straight forward |
+| Baby (B/b) | 1-2 forward, no jump, captures straight forward (NOT diagonal) |
 | Prince (P/p) | 1 step any direction (8 dirs) |
-| Princess (X/x) | 1-3 steps any direction (8 dirs), sliding (blocked by any piece in path) |
+| Princess (X/x) | 1-3 sliding any direction (8 dirs) |
 | Pony (Y/y) | 1 diagonal step (4 dirs) |
-| Guard (G/g) | 1-2 orthogonal (4 dirs), sliding |
-| Tutor (T/t) | 1-2 diagonal (4 dirs), sliding |
-| Scout (S/s) | 1-3 forward + optional ±1 sideways, CAN jump over pieces, captures only at landing |
-| Sibling (N/n) | 1 step any direction (8 dirs), destination must be adjacent to ≥1 friendly piece (not counting self) |
+| Guard (G/g) | 1-2 sliding orthogonal (4 dirs) |
+| Tutor (T/t) | 1-2 sliding diagonal (4 dirs) |
+| Scout (S/s) | 1-3 forward + optional ±1 sideways, CAN jump, captures at landing |
+| Sibling (N/n) | 1 step any (8 dirs), dest must be adjacent to ≥1 friendly (excl self) |
 
-**"Sliding" = blocked by any piece. Can capture first enemy in path but stop there.**
-
-Key:
-- White uppercase (`isupper`), Black lowercase (`islower`)
-- Cannot move onto friendly piece
-- Baby captures straight forward (same as movement direction)
-
-### 3. Evaluation Function
-Score from our player's perspective minus opponent's:
-
+### Evaluation Function
 - **Material**: Prince=100000, Princess=900, Scout=500, Guard=450, Tutor=400, Sibling=350, Pony=300, Baby=100
-- **Positional**: Babies bonus for advancing; Prince bonus for safety (friendly neighbors); center control bonus for major pieces
-- **Game over**: If a prince is missing → return ±INF
+- **Baby advancement**: `advance * 8` (white: `10 - r`, black: `r - 1`)
+- **Center bonus**: `max(0, 6 - manhattan_dist_to_5_5) * 4` for non-Baby, non-Prince
+- **Prince safety**: `friendly_neighbors * 18`
+- **Terminal**: Missing prince → ±WIN_SCORE (100M)
 
-### 4. Minimax with Alpha-Beta Pruning
-- Standard negamax-style or min/max with alpha-beta
-- Make/unmake move (save captured piece, restore)
-- Move ordering: MVV-LVA (captures first, high-value victim prioritized)
-- Check time periodically (every ~1000 nodes) via `chrono::steady_clock`
-- If time exceeded, throw/return immediately with best move found so far
+### Search
+- **Negamax** with alpha-beta pruning
+- **Iterative deepening** (depth 1..64), time check before each new depth
+- **Quiescence search** — captures-only at depth 0 with stand-pat pruning
+- **Transposition table** — Zobrist hashing, 1M entries, stores score/depth/flag/best-move
+  - Compact TTEntry: key(8) + score(4) + depth(2) + flag(1) + from_sq(1) + to_sq(1) bytes
+- **Move ordering** (pre-computed scores, incremental selection sort):
+  1. TT move (10M)
+  2. Root hint from previous depth (9M)
+  3. Captures: MVV-LVA (5M + victim*16 - attacker)
+  4. Killer moves — 2 per ply, quiet moves only (4M)
+  5. History heuristic — `history[side][from_sq][to_sq]`, incremented by `depth²` on cutoffs
+- **Prince tracking** — `white_prince_`/`black_prince_` bools updated incrementally in make/unmake (no board scan)
+- **Time check** — every 1024 nodes via `steady_clock`, throws `TimeUpException`
 
-### 5. Time Management & Iterative Deepening
-- `time_for_move = remaining_time / 40` (estimate ~40 moves per game)
-- Minimum: 0.05s; cap at ~5s per move
-- **Iterative deepening**: depth 1, 2, 3... until time budget exhausted
-  - Store best move from each completed depth
-  - Abort mid-depth → use last completed depth's best move
-- Very low time (<0.5s): depth-1 only or first legal move
+### Time Management
+- `time_for_move = min(remaining / 40, CAP)` — CAP currently set to 0.1s
+- Floor: 0.05s. Low-time fallback (<0.5s): return first ordered move, no search.
+- Time check before starting each new iterative deepening depth.
 
-## Implementation Steps
-1. Scaffolding: main(), file I/O, board parsing, output formatting
-2. Column/row conversion helpers
-3. Move struct and move generation for all 8 piece types
-4. Make/unmake move
-5. Evaluation function
-6. Minimax with alpha-beta pruning
-7. Iterative deepening + time management
-8. Move ordering (MVV-LVA)
-9. Test with opening position input.txt
+## Known Issues & Attempted Fixes
+
+### 3-Fold Repetition Draws
+**Problem**: Agent repeats the same move from the same position, opponent repeats response, causing draw by 3-fold repetition.
+
+**Attempted approach** (reverted — didn't work well):
+- Store all position hashes (Zobrist) in `playdata.txt` across moves
+- On each turn: read history, add current hash, search with repetition-aware scoring
+- In Negamax/Quiescence: if `CountRepetitions(hash_) >= 2`, return 0 (draw)
+- After choosing move: apply move, add resulting hash, write back to playdata.txt
+
+**Issues with this approach**:
+- Linear scan of game_history_ at every search node (O(n) per node, n = game length)
+- Returning 0 for repeated positions may be too aggressive — agent avoids perfectly good moves
+- The search already has TT which caches scores; repetition-return conflicts with TT entries
+- May need a more nuanced approach: only penalize at root, or use contempt factor
+
+**Ideas to revisit**:
+- Root-only repetition avoidance: only penalize at root, not deep in search
+- Track specific move played from each position, penalize only THAT move
+- Use playdata.txt to store (hash, move_played) pairs instead of just hashes
+- Small negative score instead of 0 for repetitions (contempt)
+- Only check reversible moves (non-captures, non-baby) for repetition
+
+## Future Improvements
+- Better evaluation: mobility, piece-square tables, threat detection
+- Null move pruning
+- Late move reductions (LMR)
+- Aspiration windows in iterative deepening
+- Opening book / endgame logic
+- `calibrate.cpp` for CPU-adaptive time management
 
 ## Verification
 - Compile: `g++ -std=c++17 -O2 -o homework homework.cpp`
-- Create `input.txt` with opening position, run `./homework`, check `output.txt` format
-- Test both WHITE and BLACK perspectives
-- Verify Scout jumping, Sibling adjacency constraint, Baby forward-only
+- Test: `python run_matches.py agent_baseline agent_dev -n 10`
+- Swap colors: `python compete.py agent_dev agent_baseline --swap -v`
+- Verify: Scout jumping, Sibling adjacency, Baby forward-only capture
