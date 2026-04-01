@@ -637,17 +637,25 @@ class Agent {
 
       MakeMove(m);
       int score;
-      // LMR: reduce depth for quiet moves that appear late in the list
-      bool do_lmr = (i >= 3 && depth >= 3 && m.captured == EMPTY);
-      if (do_lmr) {
-        int reduction = 1 + (i >= 6 ? 1 : 0);
-        score = -Negamax(depth - 1 - reduction, -beta, -alpha, !side_white,
-                         ply + 1);
-        if (score > alpha) {
+      if (i == 0) {
+        // First move: full window search
+        score = -Negamax(depth - 1, -beta, -alpha, !side_white, ply + 1);
+      } else {
+        // LMR for late quiet moves
+        bool do_lmr = (i >= 3 && depth >= 3 && m.captured == EMPTY);
+        if (do_lmr) {
+          int reduction = 1 + (i >= 6 ? 1 : 0);
+          score = -Negamax(depth - 1 - reduction, -alpha - 1, -alpha,
+                           !side_white, ply + 1);
+        } else {
+          // PVS: null window search
+          score = -Negamax(depth - 1, -alpha - 1, -alpha, !side_white,
+                           ply + 1);
+        }
+        // Re-search with full window if it beats alpha
+        if (score > alpha && score < beta) {
           score = -Negamax(depth - 1, -beta, -alpha, !side_white, ply + 1);
         }
-      } else {
-        score = -Negamax(depth - 1, -beta, -alpha, !side_white, ply + 1);
       }
       UnmakeMove(m);
 
