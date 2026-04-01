@@ -394,31 +394,55 @@ class Agent {
         int val = PieceValue(pu);
         int pos = 0;
         if (pu == 'B') {
+          // Baby advancement: stronger bonus for further-advanced babies
           int adv = IsWhite(p) ? (10 - r) : (r - 1);
-          if (adv > 0) pos = adv * 8;
+          if (adv > 0) pos = adv * 12;
         } else if (pu == 'P') {
           if (IsWhite(p)) { wpr = r; wpc = c; }
           else            { bpr = r; bpc = c; }
         } else {
+          // Centrality bonus for non-baby, non-prince
           int cd = std::abs(r - 5) + std::abs(c - 5);
-          pos = std::max(0, 6 - cd) * 4;
+          pos = std::max(0, 6 - cd) * 5;
         }
         if (IsWhite(p)) ws += val + pos;
         else            bs += val + pos;
       }
 
-    // Prince safety: count friendly neighbors
+    // Prince safety: friendly neighbors as defenders
     auto safety = [&](int pr, int pc, bool w) -> int {
       if (pr < 0) return 0;
-      int n = 0;
+      int friends = 0, threats = 0;
       for (const auto& d : kAllDirs) {
         int nr = pr+d[0], nc = pc+d[1];
-        if (InBounds(nr, nc) && IsFriendly(board_[nr][nc], w)) ++n;
+        if (!InBounds(nr, nc)) continue;
+        char adj = board_[nr][nc];
+        if (adj == EMPTY) continue;
+        if (IsFriendly(adj, w)) ++friends;
+        else ++threats;
       }
-      return n * 18;
+      return friends * 20 - threats * 25;
     };
     ws += safety(wpr, wpc, true);
     bs += safety(bpr, bpc, false);
+
+    // Attack pressure: bonus for pieces near the enemy prince
+    auto attack_pressure = [&](int epr, int epc, bool attacker_white) -> int {
+      if (epr < 0) return 0;
+      int pressure = 0;
+      for (int r = 0; r < BOARD_SIZE; ++r)
+        for (int c = 0; c < BOARD_SIZE; ++c) {
+          char p = board_[r][c];
+          if (p == EMPTY || !IsFriendly(p, attacker_white)) continue;
+          char pu = (char)std::toupper((unsigned char)p);
+          if (pu == 'B' || pu == 'P') continue; // skip babies and own prince
+          int dist = std::abs(r - epr) + std::abs(c - epc);
+          if (dist <= 3) pressure += (4 - dist) * 8;
+        }
+      return pressure;
+    };
+    ws += attack_pressure(bpr, bpc, true);   // white attacking black prince
+    bs += attack_pressure(wpr, wpc, false);   // black attacking white prince
 
     return side_white ? (ws - bs) : (bs - ws);
   }
