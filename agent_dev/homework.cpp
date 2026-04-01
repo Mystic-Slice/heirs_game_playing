@@ -534,7 +534,8 @@ class Agent {
   }
 
   // ── Negamax with alpha-beta + TT + killers + history ──────────────────────
-  int Negamax(int depth, int alpha, int beta, bool side_white, int ply) {
+  int Negamax(int depth, int alpha, int beta, bool side_white, int ply,
+              bool do_null = true) {
     CheckTime();
 
     // Terminal: prince captured
@@ -558,6 +559,17 @@ class Agent {
       }
       tt_move = TTMoveDecode(tte);
       tt_move_ptr = &tt_move;
+    }
+
+    // Null Move Pruning: if we can skip our turn and still get a beta cutoff,
+    // the position is so good we can prune.
+    if (do_null && depth >= 3 && beta < WIN_SCORE - 1000) {
+      int R = depth >= 6 ? 3 : 2;
+      hash_ ^= zobrist_side;
+      int null_score = -Negamax(depth - 1 - R, -beta, -beta + 1, !side_white,
+                                ply + 1, false);
+      hash_ ^= zobrist_side;
+      if (null_score >= beta) return beta;
     }
 
     // Generate & order
