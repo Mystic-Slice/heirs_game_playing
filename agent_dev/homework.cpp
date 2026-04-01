@@ -404,20 +404,20 @@ class Agent {
         int pos = 0;
         if (pu == 'B') {
           int adv = IsWhite(p) ? (10 - r) : (r - 1);
-          if (adv > 0) pos = adv * 12;
+          if (adv > 0) pos = adv * 15;  // stronger baby push incentive
         } else if (pu == 'P') {
           // Prince: no extra positional bonus
         } else {
           // Centrality
           int cd = std::abs(r - 5) + std::abs(c - 5);
           pos = std::max(0, 6 - cd) * 5;
-          // Attack pressure: bonus for non-baby pieces near enemy prince
+          // Attack pressure: bonus for pieces near enemy prince (extended range)
           if (IsWhite(p) && bpr >= 0) {
             int dist = std::abs(r - bpr) + std::abs(c - bpc);
-            if (dist <= 3) pos += (4 - dist) * 8;
+            if (dist <= 4) pos += (5 - dist) * 12;
           } else if (!IsWhite(p) && wpr >= 0) {
             int dist = std::abs(r - wpr) + std::abs(c - wpc);
-            if (dist <= 3) pos += (4 - dist) * 8;
+            if (dist <= 4) pos += (5 - dist) * 12;
           }
         }
         if (IsWhite(p)) ws += val + pos;
