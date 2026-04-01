@@ -386,6 +386,15 @@ class Agent {
     int ws = 0, bs = 0;
     int wpr = -1, wpc = -1, bpr = -1, bpc = -1;
 
+    // First pass: find princes
+    for (int r = 0; r < BOARD_SIZE; ++r)
+      for (int c = 0; c < BOARD_SIZE; ++c) {
+        char p = board_[r][c];
+        if (p == 'P') { wpr = r; wpc = c; }
+        else if (p == 'p') { bpr = r; bpc = c; }
+      }
+
+    // Second pass: material, positional, and attack pressure in one scan
     for (int r = 0; r < BOARD_SIZE; ++r)
       for (int c = 0; c < BOARD_SIZE; ++c) {
         char p = board_[r][c];
@@ -394,22 +403,28 @@ class Agent {
         int val = PieceValue(pu);
         int pos = 0;
         if (pu == 'B') {
-          // Baby advancement: stronger bonus for further-advanced babies
           int adv = IsWhite(p) ? (10 - r) : (r - 1);
           if (adv > 0) pos = adv * 12;
         } else if (pu == 'P') {
-          if (IsWhite(p)) { wpr = r; wpc = c; }
-          else            { bpr = r; bpc = c; }
+          // Prince: no extra positional bonus
         } else {
-          // Centrality bonus for non-baby, non-prince
+          // Centrality
           int cd = std::abs(r - 5) + std::abs(c - 5);
           pos = std::max(0, 6 - cd) * 5;
+          // Attack pressure: bonus for non-baby pieces near enemy prince
+          if (IsWhite(p) && bpr >= 0) {
+            int dist = std::abs(r - bpr) + std::abs(c - bpc);
+            if (dist <= 3) pos += (4 - dist) * 8;
+          } else if (!IsWhite(p) && wpr >= 0) {
+            int dist = std::abs(r - wpr) + std::abs(c - wpc);
+            if (dist <= 3) pos += (4 - dist) * 8;
+          }
         }
         if (IsWhite(p)) ws += val + pos;
         else            bs += val + pos;
       }
 
-    // Prince safety: friendly neighbors as defenders
+    // Prince safety: friendly neighbors vs threats
     auto safety = [&](int pr, int pc, bool w) -> int {
       if (pr < 0) return 0;
       int friends = 0, threats = 0;
@@ -425,24 +440,6 @@ class Agent {
     };
     ws += safety(wpr, wpc, true);
     bs += safety(bpr, bpc, false);
-
-    // Attack pressure: bonus for pieces near the enemy prince
-    auto attack_pressure = [&](int epr, int epc, bool attacker_white) -> int {
-      if (epr < 0) return 0;
-      int pressure = 0;
-      for (int r = 0; r < BOARD_SIZE; ++r)
-        for (int c = 0; c < BOARD_SIZE; ++c) {
-          char p = board_[r][c];
-          if (p == EMPTY || !IsFriendly(p, attacker_white)) continue;
-          char pu = (char)std::toupper((unsigned char)p);
-          if (pu == 'B' || pu == 'P') continue; // skip babies and own prince
-          int dist = std::abs(r - epr) + std::abs(c - epc);
-          if (dist <= 3) pressure += (4 - dist) * 8;
-        }
-      return pressure;
-    };
-    ws += attack_pressure(bpr, bpc, true);   // white attacking black prince
-    bs += attack_pressure(wpr, wpc, false);   // black attacking white prince
 
     return side_white ? (ws - bs) : (bs - ws);
   }
