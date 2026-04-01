@@ -585,8 +585,7 @@ class Agent {
       tt_move_ptr = &tt_move;
     }
 
-    // Null Move Pruning: if we can skip our turn and still get a beta cutoff,
-    // the position is so good we can prune.
+    // Null Move Pruning
     if (do_null && depth >= 3 && beta < WIN_SCORE - 1000) {
       int R = depth >= 6 ? 3 : 2;
       hash_ ^= zobrist_side;
@@ -594,6 +593,15 @@ class Agent {
                                 ply + 1, false);
       hash_ ^= zobrist_side;
       if (null_score >= beta) return beta;
+    }
+
+    // Futility pruning: at low depths, if static eval is far below alpha,
+    // quiet moves are unlikely to raise it enough.
+    bool futile = false;
+    if (depth <= 2 && alpha < WIN_SCORE - 1000 && alpha > -WIN_SCORE + 1000) {
+      int static_eval = Evaluate(side_white);
+      int margin = depth == 1 ? 300 : 600;
+      if (static_eval + margin <= alpha) futile = true;
     }
 
     // Generate & order
@@ -612,6 +620,9 @@ class Agent {
       PickBest(moves, scores, i);
       const Move& m = moves.moves[i];
 
+      // Futility: skip quiet moves at low depth if position is hopeless
+      if (futile && m.captured == EMPTY && i > 0) continue;
+
       MakeMove(m);
       int score;
       // LMR: reduce depth for quiet moves that appear late in the list
@@ -620,7 +631,6 @@ class Agent {
         int reduction = 1 + (i >= 6 ? 1 : 0);
         score = -Negamax(depth - 1 - reduction, -beta, -alpha, !side_white,
                          ply + 1);
-        // Re-search at full depth if LMR result beats alpha
         if (score > alpha) {
           score = -Negamax(depth - 1, -beta, -alpha, !side_white, ply + 1);
         }
