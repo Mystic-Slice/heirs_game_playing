@@ -589,7 +589,20 @@ class Agent {
       const Move& m = moves.moves[i];
 
       MakeMove(m);
-      int score = -Negamax(depth - 1, -beta, -alpha, !side_white, ply + 1);
+      int score;
+      // LMR: reduce depth for quiet moves that appear late in the list
+      bool do_lmr = (i >= 3 && depth >= 3 && m.captured == EMPTY);
+      if (do_lmr) {
+        int reduction = 1 + (i >= 6 ? 1 : 0);
+        score = -Negamax(depth - 1 - reduction, -beta, -alpha, !side_white,
+                         ply + 1);
+        // Re-search at full depth if LMR result beats alpha
+        if (score > alpha) {
+          score = -Negamax(depth - 1, -beta, -alpha, !side_white, ply + 1);
+        }
+      } else {
+        score = -Negamax(depth - 1, -beta, -alpha, !side_white, ply + 1);
+      }
       UnmakeMove(m);
 
       if (score > best) { best = score; best_move = m; }
