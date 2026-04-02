@@ -76,7 +76,7 @@ struct InputState {
 };
 
 // ── Transposition table ──────────────────────────────────────────────────────
-constexpr int TT_SIZE = 1 << 20;
+constexpr int TT_SIZE = 1 << 19;  // 512K entries, better cache locality
 constexpr int TT_MASK = TT_SIZE - 1;
 enum TTFlag : std::uint8_t { TT_EXACT, TT_ALPHA, TT_BETA };
 
