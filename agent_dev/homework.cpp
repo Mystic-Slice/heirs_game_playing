@@ -613,6 +613,16 @@ class Agent {
       if (rfp_eval - rfp_margin >= beta) return beta;
     }
 
+    // Razoring: if eval is far below alpha at low depth, drop to qsearch
+    if (depth <= 2 && alpha > -WIN_SCORE + 1000) {
+      int razor_eval = Evaluate(side_white);
+      int razor_margin = depth == 1 ? 300 : 600;
+      if (razor_eval + razor_margin <= alpha) {
+        int qscore = Quiescence(alpha, beta, side_white);
+        if (qscore <= alpha) return alpha;
+      }
+    }
+
     // Null Move Pruning
     if (do_null && depth >= 3 && beta < WIN_SCORE - 1000) {
       int R = depth >= 6 ? 3 : 2;
