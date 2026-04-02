@@ -424,19 +424,20 @@ class Agent {
         else            bs += val + pos;
       }
 
-    // Prince safety: friendly neighbors vs threats
+    // Prince safety: friendly neighbors vs threats + escape squares
     auto safety = [&](int pr, int pc, bool w) -> int {
       if (pr < 0) return 0;
-      int friends = 0, threats = 0;
+      int friends = 0, threats = 0, escapes = 0;
       for (const auto& d : kAllDirs) {
         int nr = pr+d[0], nc = pc+d[1];
         if (!InBounds(nr, nc)) continue;
         char adj = board_[nr][nc];
-        if (adj == EMPTY) continue;
+        if (adj == EMPTY) { ++escapes; continue; }
         if (IsFriendly(adj, w)) ++friends;
         else ++threats;
       }
-      return friends * 20 - threats * 25;
+      // Fewer escapes = more trapped = more dangerous for this prince
+      return friends * 20 - threats * 25 + escapes * 10;
     };
     ws += safety(wpr, wpc, true);
     bs += safety(bpr, bpc, false);
