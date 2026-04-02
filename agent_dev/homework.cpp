@@ -232,6 +232,21 @@ class Agent {
       throw TimeUpException();
   }
 
+  // Check if a move lands adjacent to the enemy prince
+  bool ThreatensPrince(const Move& m, bool side_white) const {
+    // After this move, is the destination adjacent to the enemy prince?
+    for (int dr = -1; dr <= 1; ++dr)
+      for (int dc = -1; dc <= 1; ++dc) {
+        if (!dr && !dc) continue;
+        int nr = m.dr + dr, nc = m.dc + dc;
+        if (!InBounds(nr, nc)) continue;
+        char adj = board_[nr][nc];
+        if (side_white && adj == 'p') return true;
+        if (!side_white && adj == 'P') return true;
+      }
+    return false;
+  }
+
   void HashPiece(char p, int r, int c) {
     int pi = PieceIndex(p);
     if (pi != PIECE_NONE) hash_ ^= zobrist_piece[pi][r][c];
@@ -636,26 +651,30 @@ class Agent {
       // Futility: skip quiet moves at low depth if position is hopeless
       if (futile && m.captured == EMPTY && i > 0) continue;
 
+      // Extension: search deeper when we threaten the enemy prince
+      int ext = 0;
+      if (depth <= 4 && ThreatensPrince(m, side_white)) ext = 1;
+
       MakeMove(m);
       int score;
       if (i == 0) {
         // First move: full window search
-        score = -Negamax(depth - 1, -beta, -alpha, !side_white, ply + 1);
+        score = -Negamax(depth - 1 + ext, -beta, -alpha, !side_white, ply + 1);
       } else {
         // LMR for late quiet moves
-        bool do_lmr = (i >= 3 && depth >= 3 && m.captured == EMPTY);
+        bool do_lmr = (i >= 3 && depth >= 3 && m.captured == EMPTY && ext == 0);
         if (do_lmr) {
           int reduction = 1 + (i >= 6 ? 1 : 0);
           score = -Negamax(depth - 1 - reduction, -alpha - 1, -alpha,
                            !side_white, ply + 1);
         } else {
           // PVS: null window search
-          score = -Negamax(depth - 1, -alpha - 1, -alpha, !side_white,
+          score = -Negamax(depth - 1 + ext, -alpha - 1, -alpha, !side_white,
                            ply + 1);
         }
         // Re-search with full window if it beats alpha
         if (score > alpha && score < beta) {
-          score = -Negamax(depth - 1, -beta, -alpha, !side_white, ply + 1);
+          score = -Negamax(depth - 1 + ext, -beta, -alpha, !side_white, ply + 1);
         }
       }
       UnmakeMove(m);
