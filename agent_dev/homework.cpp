@@ -426,6 +426,25 @@ class Agent {
           // Centrality
           int cd = std::abs(r - 5) + std::abs(c - 5);
           pos = std::max(0, 6 - cd) * 5;
+
+          // Piece-specific positional bonuses
+          if (pu == 'X') {
+            // Princess: extra centrality bonus (she's strongest with room)
+            pos += std::max(0, 6 - cd) * 3;
+          } else if (pu == 'S') {
+            // Scout: bonus for being on attacking half
+            int adv = IsWhite(p) ? (BOARD_SIZE - 1 - r) : r;
+            pos += adv * 3;
+          } else if (pu == 'G' || pu == 'T') {
+            // Guard/Tutor: bonus for being near own prince (defensive)
+            int opr = IsWhite(p) ? wpr : bpr;
+            int opc = IsWhite(p) ? wpc : bpc;
+            if (opr >= 0) {
+              int dist = std::abs(r - opr) + std::abs(c - opc);
+              if (dist <= 3) pos += (4 - dist) * 8;
+            }
+          }
+
           // Attack pressure: bonus for pieces near enemy prince (extended range)
           if (IsWhite(p) && bpr >= 0) {
             int dist = std::abs(r - bpr) + std::abs(c - bpc);
