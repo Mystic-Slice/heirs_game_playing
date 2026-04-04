@@ -86,10 +86,12 @@ compete.py              <-- Game harness: runs two agents against each other
 engine.cpp              <-- Move validator used by compete.py
 check_moves.cpp         <-- Legal move counter used by compete.py
 run_matches.py          <-- Batch runner for N games (You should mostly use this)
-results.tsv             <-- Experiment log (you create this)
+results.tsv             <-- Experiment log (you create and maintain this)
 ```
 
 ## Setup
+
+If there is a `results.tsv` in the repo, read it to understand what experiments have already been done. You can continue from there. If not, start fresh.
 
 To set up a new experiment, work with the user to:
 
