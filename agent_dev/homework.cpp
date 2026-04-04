@@ -503,7 +503,11 @@ class Agent {
         { scores[i] = 4000000; continue; }
       // History
       int side = w ? 0 : 1;
-      scores[i] = history_[side][Sq(m.sr, m.sc)][Sq(m.dr, m.dc)];
+      s = history_[side][Sq(m.sr, m.sc)][Sq(m.dr, m.dc)];
+      // Tactical ordering: quiet moves that pressure the enemy prince
+      // are searched earlier, improving cutoffs in sharp positions.
+      if (ThreatensPrince(m, w)) s += 1500000;
+      scores[i] = s;
     }
   }
 
