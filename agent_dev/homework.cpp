@@ -143,13 +143,8 @@ class TimeUpException {};
 // ── Agent ────────────────────────────────────────────────────────────────────
 class Agent {
  public:
-  struct PlayData {
-    int my_moves = 0;
-    bool valid = false;
-  };
-
   explicit Agent(const InputState& st)
-      : my_is_white_(st.my_is_white), my_time_(st.my_time), opp_time_(st.opp_time) {
+      : my_is_white_(st.my_is_white), my_time_(st.my_time) {
     hash_ = 0;
     white_prince_ = false;
     black_prince_ = false;
@@ -166,7 +161,6 @@ class Agent {
     tt_.reset(new TTEntry[TT_SIZE]());
     std::memset(killers_, 0, sizeof(killers_));
     std::memset(history_, 0, sizeof(history_));
-    LoadPlayData();
   }
 
   bool SelectMove(Move* best_move) {
@@ -180,18 +174,10 @@ class Agent {
     PickBest(legal, scores, 0);
     *best_move = legal.moves[0];
 
-    if (my_time_ < 0.5) {
-      SavePlayData();
-      return true;
-    }
+    if (my_time_ < 0.5) return true;
 
     double time_for_move = std::min(my_time_ / 40.0, 0.05);
     if (time_for_move < 0.03) time_for_move = 0.03;
-    double time_gap = my_time_ - opp_time_;
-    if (playdata_.valid && playdata_.my_moves >= 40 && time_gap < -0.2)
-      time_for_move = std::min(time_for_move, 0.04);
-    if (playdata_.valid && playdata_.my_moves >= 80 && time_gap < -0.6)
-      time_for_move = std::min(time_for_move, 0.03);
 
     deadline_ = std::chrono::steady_clock::now() +
                 std::chrono::duration_cast<std::chrono::steady_clock::duration>(
@@ -212,7 +198,6 @@ class Agent {
         break;
       }
     }
-    SavePlayData();
     return true;
   }
 
@@ -220,11 +205,9 @@ class Agent {
   // ── State ──────────────────────────────────────────────────────────────────
   bool my_is_white_;
   double my_time_;
-  double opp_time_;
   char board_[BOARD_SIZE][BOARD_SIZE];
   std::uint64_t hash_ = 0;
   bool white_prince_ = true, black_prince_ = true;
-  PlayData playdata_{};
 
   std::chrono::steady_clock::time_point deadline_{};
   std::uint64_t node_count_ = 0;
@@ -240,23 +223,6 @@ class Agent {
 
   static bool SameMove(const Move& a, const Move& b) {
     return a.sr == b.sr && a.sc == b.sc && a.dr == b.dr && a.dc == b.dc;
-  }
-
-  void LoadPlayData() {
-    std::ifstream in("playdata.txt");
-    if (!in) return;
-    std::string tag;
-    int moves = 0;
-    if (!(in >> tag >> moves)) return;
-    if (tag != "V1" || moves < 0) return;
-    playdata_.my_moves = moves;
-    playdata_.valid = true;
-  }
-
-  void SavePlayData() const {
-    std::ofstream out("playdata.txt", std::ios::trunc);
-    if (!out) return;
-    out << "V1 " << (playdata_.my_moves + 1) << "\n";
   }
 
   void CheckTime() {
