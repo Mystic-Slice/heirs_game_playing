@@ -75,6 +75,7 @@ def main():
             os.remove(outcome_filename)
 
         print(f"--- Game {game_num}/{num_matches} | my_agent={my_color} ---")
+        sys.stdout.flush()
 
         rc = subprocess.call([sys.executable, compete_path, dir1, dir2])
 
@@ -93,6 +94,7 @@ def main():
             draws += 1
 
         print(f"  Result: {result}  (Running: {wins}W-{losses}L-{draws}D)\n")
+        sys.stdout.flush()
 
     # Write results
     with open("outcome.txt", "w") as f:
