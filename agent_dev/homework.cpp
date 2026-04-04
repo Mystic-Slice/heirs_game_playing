@@ -143,8 +143,17 @@ class TimeUpException {};
 // ── Agent ────────────────────────────────────────────────────────────────────
 class Agent {
  public:
+  struct PlayData {
+    int my_moves = 0;
+    double prev_my_time = -1.0;
+    double prev_opp_time = -1.0;
+    double avg_my_spent = 0.05;
+    double avg_opp_spent = 0.05;
+    bool valid = false;
+  };
+
   explicit Agent(const InputState& st)
-      : my_is_white_(st.my_is_white), my_time_(st.my_time) {
+      : my_is_white_(st.my_is_white), my_time_(st.my_time), opp_time_(st.opp_time) {
     hash_ = 0;
     white_prince_ = false;
     black_prince_ = false;
@@ -161,6 +170,7 @@ class Agent {
     tt_.reset(new TTEntry[TT_SIZE]());
     std::memset(killers_, 0, sizeof(killers_));
     std::memset(history_, 0, sizeof(history_));
+    LoadPlayData();
   }
 
   bool SelectMove(Move* best_move) {
@@ -174,10 +184,12 @@ class Agent {
     PickBest(legal, scores, 0);
     *best_move = legal.moves[0];
 
-    if (my_time_ < 0.5) return true;
+    if (my_time_ < 0.5) {
+      SavePlayData();
+      return true;
+    }
 
-    double time_for_move = std::min(my_time_ / 40.0, 0.05);
-    if (time_for_move < 0.03) time_for_move = 0.03;
+    double time_for_move = ComputeTimeForMove();
 
     deadline_ = std::chrono::steady_clock::now() +
                 std::chrono::duration_cast<std::chrono::steady_clock::duration>(
@@ -198,6 +210,7 @@ class Agent {
         break;
       }
     }
+    SavePlayData();
     return true;
   }
 
@@ -205,9 +218,11 @@ class Agent {
   // ── State ──────────────────────────────────────────────────────────────────
   bool my_is_white_;
   double my_time_;
+  double opp_time_;
   char board_[BOARD_SIZE][BOARD_SIZE];
   std::uint64_t hash_ = 0;
   bool white_prince_ = true, black_prince_ = true;
+  PlayData playdata_{};
 
   std::chrono::steady_clock::time_point deadline_{};
   std::uint64_t node_count_ = 0;
@@ -223,6 +238,62 @@ class Agent {
 
   static bool SameMove(const Move& a, const Move& b) {
     return a.sr == b.sr && a.sc == b.sc && a.dr == b.dr && a.dc == b.dc;
+  }
+
+  void LoadPlayData() {
+    std::ifstream in("playdata.txt");
+    if (!in) return;
+
+    std::string tag;
+    PlayData pd{};
+    if (!(in >> tag) || tag != "V1") return;
+    if (!(in >> pd.my_moves >> pd.prev_my_time >> pd.prev_opp_time
+             >> pd.avg_my_spent >> pd.avg_opp_spent))
+      return;
+    if (pd.my_moves < 0) return;
+
+    pd.valid = true;
+    playdata_ = pd;
+  }
+
+  double ComputeTimeForMove() const {
+    double time_for_move = std::min(my_time_ / 40.0, 0.05);
+    if (time_for_move < 0.03) time_for_move = 0.03;
+
+    if (playdata_.valid) {
+      double margin = playdata_.avg_opp_spent - playdata_.avg_my_spent;
+      double adjust = std::max(-0.010, std::min(0.010, margin * 0.6));
+      time_for_move += adjust;
+
+      // If we've been slower than opponent in a long game, preserve time edge.
+      if (playdata_.my_moves >= 60 && margin < -0.003)
+        time_for_move = std::min(time_for_move, 0.04);
+    }
+
+    if (my_time_ < 20.0) time_for_move = std::min(time_for_move, 0.04);
+    if (my_time_ < 5.0)  time_for_move = std::min(time_for_move, 0.025);
+    if (time_for_move < 0.02) time_for_move = 0.02;
+    if (time_for_move > 0.07) time_for_move = 0.07;
+    return time_for_move;
+  }
+
+  void SavePlayData() {
+    if (playdata_.valid) {
+      double my_spent = playdata_.prev_my_time - my_time_;
+      if (my_spent > 0.0 && my_spent < 5.0)
+        playdata_.avg_my_spent = playdata_.avg_my_spent * 0.7 + my_spent * 0.3;
+
+      double opp_spent = playdata_.prev_opp_time - opp_time_;
+      if (opp_spent > 0.0 && opp_spent < 5.0)
+        playdata_.avg_opp_spent = playdata_.avg_opp_spent * 0.7 + opp_spent * 0.3;
+    }
+
+    std::ofstream out("playdata.txt", std::ios::trunc);
+    if (!out) return;
+    out << "V1\n";
+    out << (playdata_.my_moves + 1) << " "
+        << my_time_ << " " << opp_time_ << " "
+        << playdata_.avg_my_spent << " " << playdata_.avg_opp_spent << "\n";
   }
 
   void CheckTime() {
