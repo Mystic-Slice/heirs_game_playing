@@ -186,6 +186,13 @@ class Agent {
     has_root_hint_ = false;
     for (int depth = 1; depth <= MAX_PLY; ++depth) {
       if (std::chrono::steady_clock::now() >= deadline_) break;
+      // Age history table to prevent stale ordering from dominating
+      if (depth > 1) {
+        for (auto& s : history_)
+          for (auto& from : s)
+            for (auto& to : from)
+              to >>= 1;
+      }
       node_count_ = 0;
       try {
         Move db{}; int ds = -INF_SCORE;
