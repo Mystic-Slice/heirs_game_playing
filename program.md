@@ -119,11 +119,11 @@ python compete.py <dir1> <dir2> [-v]
 
 **Running a batch of N games:**
 ```bash
-python run_matches.py algorithms/minimax . -n 10
+python run_matches.py algorithms/minimax . -n 2
 ```
-This runs 10 games, alternating colors, and writes results to `outcome.txt`. It prints a summary like:
+This runs 2 games, alternating colors, and writes results to `outcome.txt`. It prints a summary like:
 ```
-FINAL: 8W-1L-1D  (80.0% win rate)
+FINAL: 1W-1L-0D  (50.0% win rate)
 ```
 
 **What to measure:**
@@ -195,7 +195,7 @@ LOOP FOREVER:
 3. Compile to verify it builds: `g++ -std=c++17 -O2 -o homework homework.cpp`
 4. If compilation fails, fix the error and try again. If you can't fix it after a few attempts, give up on this idea.
 5. git commit the change.
-6. Run the evaluation: `python run_matches.py agent_dev algorithms/minimax . -n 10 > run.log 2>&1`. Feel free to use fewer matches for quick iteration, but in major checkpoints, ensure you have enough to get a reliable signal (e.g. 10). Note: The `run_matches.py` script assumes the first agent is your agent and the second is the opponent, so the results are from your agent's perspective. Run only one evaluation at a time.
+6. Run the evaluation: `python run_matches.py agent_dev algorithms/minimax . -n 2 > run.log 2>&1`. Feel free to use fewer matches for quick iteration, but in major checkpoints, ensure you have enough to get a reliable signal (e.g. 2). Note: The `run_matches.py` script assumes the first agent is your agent and the second is the opponent, so the results are from your agent's perspective. Run only one evaluation at a time. If the algorithms are deterministic, do not run more than 2 games since it will just repeat the same result.
 7. Read the results: `tail -3 run.log`
 8. If the tail output doesn't contain a FINAL summary line, the run crashed or timed out. Run `tail -n 50 run.log` to diagnose. Attempt a fix if trivial.
 9. Record the results in `results.tsv` (do NOT commit results.tsv — leave it untracked).
