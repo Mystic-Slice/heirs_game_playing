@@ -746,7 +746,16 @@ class Agent {
       const Move& m = moves.moves[i];
 
       MakeMove(m);
-      int score = -Negamax(depth - 1, -beta, -alpha, !my_is_white_, 1);
+      int score;
+      if (i == 0) {
+        score = -Negamax(depth - 1, -beta, -alpha, !my_is_white_, 1);
+      } else {
+        // PVS: null-window first, re-search if it beats alpha
+        score = -Negamax(depth - 1, -alpha - 1, -alpha, !my_is_white_, 1);
+        if (score > alpha && score < beta) {
+          score = -Negamax(depth - 1, -beta, -alpha, !my_is_white_, 1);
+        }
+      }
       UnmakeMove(m);
 
       if (score > local_best) { local_best = score; local_move = m; }
