@@ -483,6 +483,24 @@ class Agent {
     ws += safety(wpr, wpc, true);
     bs += safety(bpr, bpc, false);
 
+    // Connectivity: bonus for non-baby pieces adjacent to friendly pieces
+    for (int r = 0; r < BOARD_SIZE; ++r)
+      for (int c = 0; c < BOARD_SIZE; ++c) {
+        char p = board_[r][c];
+        if (p == EMPTY) continue;
+        char pu = (char)std::toupper((unsigned char)p);
+        if (pu == 'B') continue; // babies don't need connectivity
+        bool w = IsWhite(p);
+        int adj_friends = 0;
+        for (const auto& d : kAllDirs) {
+          int nr = r+d[0], nc = c+d[1];
+          if (InBounds(nr, nc) && board_[nr][nc] != EMPTY && IsFriendly(board_[nr][nc], w))
+            ++adj_friends;
+        }
+        int conn_bonus = adj_friends * 5;
+        if (w) ws += conn_bonus; else bs += conn_bonus;
+      }
+
     return side_white ? (ws - bs) : (bs - ws);
   }
 
