@@ -176,8 +176,8 @@ class Agent {
 
     if (my_time_ < 0.5) return true;
 
-    double time_for_move = std::min(my_time_ / 40.0, 0.05);
-    if (time_for_move < 0.03) time_for_move = 0.03;
+    double time_for_move = std::min(my_time_ / 40.0, 0.045);
+    if (time_for_move < 0.028) time_for_move = 0.028;
 
     deadline_ = std::chrono::steady_clock::now() +
                 std::chrono::duration_cast<std::chrono::steady_clock::duration>(
