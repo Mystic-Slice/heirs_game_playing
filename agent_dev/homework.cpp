@@ -137,6 +137,11 @@ void WriteOutput(const std::string& path, const std::string& s) {
   if (out) out << s << "\n";
 }
 
+double getCurrentTime() {
+  return std::chrono::duration<double>(
+      std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
 // ── TimeUp ───────────────────────────────────────────────────────────────────
 class TimeUpException {};
 
@@ -176,8 +181,13 @@ class Agent {
 
     if (my_time_ < 0.5) return true;
 
-    double time_for_move = std::min(my_time_ / 40.0, 0.045);
-    if (time_for_move < 0.028) time_for_move = 0.028;
+    double time_for_move = 0.05;
+    double old_time = getOldTime();
+    double opponent_time = getCurrentTime() - old_time;
+    if (old_time > 0.0) {
+      time_for_move = std::max(opponent_time * 0.5, time_for_move);
+    }
+    time_for_move = std::min(time_for_move, 1.0);
 
     deadline_ = std::chrono::steady_clock::now() +
                 std::chrono::duration_cast<std::chrono::steady_clock::duration>(
@@ -237,6 +247,22 @@ class Agent {
     if ((node_count_ & 1023ULL) == 0ULL &&
         std::chrono::steady_clock::now() >= deadline_)
       throw TimeUpException();
+  }
+
+  double getOldTime() const {
+    std::ifstream in("playdata.txt");
+    if (!in) {
+      return -1.0;
+    }
+    std::string s;
+    double t;
+    if (!(in >> s)) return -1.0;
+    try {
+      t = std::stod(s);
+    } catch (const std::exception& e) {
+      return -1.0;
+    }
+    return t;
   }
 
   // Check if a move lands adjacent to the enemy prince
@@ -482,24 +508,6 @@ class Agent {
     };
     ws += safety(wpr, wpc, true);
     bs += safety(bpr, bpc, false);
-
-    // Connectivity: bonus for non-baby pieces adjacent to friendly pieces
-    for (int r = 0; r < BOARD_SIZE; ++r)
-      for (int c = 0; c < BOARD_SIZE; ++c) {
-        char p = board_[r][c];
-        if (p == EMPTY) continue;
-        char pu = (char)std::toupper((unsigned char)p);
-        if (pu == 'B') continue; // babies don't need connectivity
-        bool w = IsWhite(p);
-        int adj_friends = 0;
-        for (const auto& d : kAllDirs) {
-          int nr = r+d[0], nc = c+d[1];
-          if (InBounds(nr, nc) && board_[nr][nc] != EMPTY && IsFriendly(board_[nr][nc], w))
-            ++adj_friends;
-        }
-        int conn_bonus = adj_friends * 5;
-        if (w) ws += conn_bonus; else bs += conn_bonus;
-      }
 
     return side_white ? (ws - bs) : (bs - ws);
   }
@@ -797,6 +805,7 @@ class Agent {
 }  // namespace
 
 int main() {
+
   InitZobrist();
   InputState state{};
   if (!ReadInput("input.txt", &state)) {
@@ -810,5 +819,9 @@ int main() {
     return 0;
   }
   WriteOutput("output.txt", MoveToString(best));
+
+  // print current time to playdata.txt
+  double now = getCurrentTime();
+  WriteOutput("playdata.txt", std::to_string(now));
   return 0;
 }

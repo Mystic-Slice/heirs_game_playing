@@ -26,6 +26,12 @@ def read_outcome(outcome_path, my_agent_dir):
             return "LOSE"
     else:
         return "DRAW"
+    
+def clean_up_files(my_agent_dir, minimax_dir):
+    """Remove playdata.txt and outcome files to avoid interference in the next game."""
+    for path in [f"{my_agent_dir}/playdata.txt", f"{minimax_dir}/playdata.txt"]:
+        if os.path.exists(path):
+            os.remove(path)
 
 
 def main():
@@ -47,6 +53,8 @@ def main():
             compete_path = "compete.py"
     if not os.path.isfile(compete_path):
         sys.exit(f"Cannot find compete.py at: {compete_path}")
+
+    clean_up_files(args.my_agent, args.minimax)
 
     minimax_dir = args.minimax
     my_agent_dir = args.my_agent
@@ -95,6 +103,9 @@ def main():
 
         print(f"  Result: {result}  (Running: {wins}W-{losses}L-{draws}D)\n")
         sys.stdout.flush()
+
+        # Clean up the playdata.txt file if it exists, to avoid interference in the next game
+        clean_up_files(my_agent_dir, minimax_dir)
 
     # Write results
     with open("outcome.txt", "w") as f:
